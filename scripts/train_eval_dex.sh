@@ -77,7 +77,7 @@ cd ManiFlow/maniflow/workspace
 # Training phase
 if [ $train = True ]; then
     echo -e "\033[32m=== Starting Training ===\033[0m"
-    python train_maniflow_dex_workspace.py \
+    python3 train_maniflow_dex_workspace.py \
         --config-name=${config_name}.yaml \
         task=${task_name} \
         task.dataset.zarr_path=${dataset_path} \

@@ -1,5 +1,5 @@
 defaults:
-  - task: your_task_name_here
+  - task: coffee_cup
 
 name: train_maniflow_image_timm_policy
 
@@ -109,15 +109,15 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 128
-  num_workers: 8
+  batch_size: 16
+  num_workers: 2
   shuffle: True
   pin_memory: True
   persistent_workers: False
 
 val_dataloader:
-  batch_size: 128 # 128
-  num_workers: 8
+  batch_size: 16 # 128
+  num_workers: 2
   shuffle: False
   pin_memory: True
   persistent_workers: False
