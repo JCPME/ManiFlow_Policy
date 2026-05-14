@@ -6,7 +6,7 @@
 # bash scripts/train_eval_dex.sh maniflow_image_timm_policy_dex dexart_laptop_image image_debug 0 1
 
 DEBUG=False
-save_ckpt=False
+save_ckpt=True
 train=True
 eval=False # set to false since mostly we do online eval for adroit/dexart tasks
 

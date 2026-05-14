@@ -110,14 +110,14 @@ ema:
 
 dataloader:
   batch_size: 16
-  num_workers: 2
+  num_workers: 4
   shuffle: True
   pin_memory: True
   persistent_workers: False
 
 val_dataloader:
   batch_size: 16 # 128
-  num_workers: 2
+  num_workers: 4
   shuffle: False
   pin_memory: True
   persistent_workers: False
@@ -134,14 +134,14 @@ training:
   env_device: "cuda:0"
   seed: 42
   debug: False
-  resume: True
+  resume: False
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 501
+  num_epochs: 100
   gradient_accumulate_every: 1
   use_ema: True
   rollout_every: 100
-  checkpoint_every: 100
+  checkpoint_every: 10
   val_every: 50
   sample_every: 5
   max_train_steps: null
@@ -154,20 +154,20 @@ logging:
   mode: online
   name: ${training.seed}
   project: your_project_name_here
-  resume: true
+  resume: false
   tags:
   - ${logging.project}
 
 checkpoint:
   save_ckpt: True # if True, save checkpoint every checkpoint_every
   topk:
-    monitor_key: val_loss # test_mean_score, val_loss
+    monitor_key: train_loss # test_mean_score, val_loss
     # mode: max
     # k: 0
     # format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
     mode: min
     k: 1
-    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.6f}.ckpt'
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.6f}.ckpt'
   save_last_ckpt: True # this only saves when save_ckpt is True
   save_last_snapshot: False
 

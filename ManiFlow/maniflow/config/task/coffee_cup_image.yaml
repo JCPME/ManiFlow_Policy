@@ -5,16 +5,16 @@ task_name: coffee_cup
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
   obs:
-    camera_1:
-        shape: [3, 448, 448]
+    image:
+        shape: [3, 224, 224]
         type: rgb
         horizon: 2
     agent_pos:
-      shape: [24]
+      shape: [26]
       type: low_dim
       horizon: 2
   action:
-    shape: [24]
+    shape: [26]
     horizon: 16
 
 # env_runner:
