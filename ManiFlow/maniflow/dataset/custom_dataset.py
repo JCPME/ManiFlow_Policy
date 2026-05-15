@@ -22,8 +22,14 @@ def quat_to_rotmat(q: np.ndarray) -> np.ndarray:
 
 
 def rotmat_to_6d(R: np.ndarray) -> np.ndarray:
-    """R: (..., 3, 3) → 6D: (..., 6), first two columns of R, flattened."""
-    return R[..., :, :2].reshape(*R.shape[:-2], 6)
+    """R: (..., 3, 3) → 6D: (..., 6) = [col0 | col1].
+
+    Standard Zhou-et-al 6D form. Must stay consistent with `sixd_to_rotmat`,
+    which Gram-Schmidts (a, b) treating them as the first two columns of R.
+    A row-major reshape of R[:, :2] would interleave row entries instead, and
+    the decoder's Gram-Schmidt would then operate on garbage 3-vectors.
+    """
+    return np.concatenate([R[..., 0], R[..., 1]], axis=-1)
 
 
 def sixd_to_rotmat(d6: np.ndarray) -> np.ndarray:
