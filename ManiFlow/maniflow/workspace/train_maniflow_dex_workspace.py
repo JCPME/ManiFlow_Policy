@@ -100,7 +100,7 @@ class TrainManiFlowDexWorkspace:
             RUN_CKPT = True
             verbose = False
         
-        RUN_VALIDATION = False # reduce time cost
+        RUN_VALIDATION = True # reduce time cost
         
         # resume training
         if cfg.training.resume:
@@ -365,7 +365,11 @@ class TrainManiFlowDexWorkspace:
             if (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
                 # checkpointing
                 if cfg.checkpoint.save_last_ckpt:
-                    self.save_checkpoint()
+                    latest_ckpt_path = self.save_checkpoint()
+                    artifact = wandb.Artifact(
+                        name=f"{wandb_run.name}-latest", type="model")
+                    artifact.add_file(latest_ckpt_path, name="latest.ckpt")
+                    wandb_run.log_artifact(artifact, aliases=["latest", f"epoch-{self.epoch}"])
                 if cfg.checkpoint.save_last_snapshot:
                     self.save_snapshot()
 
