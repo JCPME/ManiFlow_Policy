@@ -39,8 +39,10 @@ if str(MANIFLOW_SRC) not in sys.path:
 
 from maniflow.workspace.train_maniflow_dex_workspace import TrainManiFlowDexWorkspace
 from maniflow.dataset.custom_dataset import (
-    quat_to_rotmat, rotmat_to_6d, sixd_to_rotmat,
+    quat_to_rotmat, rotmat_to_6d, sixd_to_rotmat, sixd_to_rotmat_oldformat
 )
+torch.manual_seed(0)
+torch.cuda.manual_seed(0)
 
 
 N_OBS_STEPS = 2          # must match training config
@@ -56,7 +58,7 @@ def relative_action_to_absolute(action_rel: np.ndarray,
     rot_rel = action_rel[:, 3:9]
     hand    = action_rel[:, 9:]
     pos_abs = pos_rel @ base_rot.T + base_pos[None, :]
-    R_rel   = sixd_to_rotmat(rot_rel)                  # (T,3,3)
+    R_rel   = sixd_to_rotmat_oldformat(rot_rel)                  # (T,3,3)
     R_abs   = base_rot[None, :, :] @ R_rel             # (T,3,3)
     quat    = Rotation.from_matrix(R_abs).as_quat()    # xyzw, (T,4)
     return np.concatenate([pos_abs, quat, hand], axis=-1)
@@ -85,13 +87,16 @@ def main():
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--only', choices=['model', 'ema_model', 'both'],
                         default='both', help='Which policy to evaluate.')
+    parser.add_argument('--episode-idx', type=int, default=0,
+                        help='Episode to roll out pred-vs-recorded across.')
     args = parser.parse_args()
 
     # ---- load workspace + policy --------------------------------------------
     print(f'Loading checkpoint: {args.checkpoint}')
     ws = TrainManiFlowDexWorkspace.create_from_checkpoint(args.checkpoint)
     cfg = ws.cfg
-
+    print(cfg)
+    
     # Instantiate the dataset ONCE — its ReplayBuffer holds ~7 GB of images and
     # we don't want two copies in RAM. Reuse it across model/ema_model.
     import hydra
@@ -107,6 +112,7 @@ def main():
 
     print('Instantiating dataset (this loads the zarr into memory)…')
     dataset = hydra.utils.instantiate(cfg.task.dataset)
+
     print(f'Dataset size: {len(dataset)}')
 
     candidates = []
@@ -125,6 +131,8 @@ def main():
             if other_tag != tag and other_model is not None:
                 other_model.to('cpu')
         model.eval().to(args.device)
+
+
         evaluate_one(model, cfg, args, dataset)
 
 
@@ -285,6 +293,123 @@ def evaluate_one(policy, cfg, args, dataset):
               ', '.join(f'{action_pred_rel[t,d]:+6.3f}' for d in range(17, 26)) + ']')
         print(f'               target[' +
               ', '.join(f'{gt_rel[t,d]:+6.3f}' for d in range(17, 26)) + ']')
+
+    # ---- plot 1: pred vs target across the single 64-frame horizon ----------
+    import matplotlib.pyplot as plt
+
+    horizon_axis = np.arange(action_pred_rel.shape[0])
+    n_cols = 6
+    n_rows = int(np.ceil(len(dim_labels) / n_cols))
+    fig1, axes1 = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2 * n_rows),
+                               sharex=True)
+    for d, name in enumerate(dim_labels):
+        ax = axes1.flatten()[d]
+        ax.plot(horizon_axis, gt_rel[:, d],          'k-',  lw=1.4, label='target')
+        ax.plot(horizon_axis, action_pred_rel[:, d], 'C1-', lw=1.4, label='pred')
+        lo, hi = rel_actions[:, d].min(), rel_actions[:, d].max()
+        ax.axhspan(lo, hi, color='gray', alpha=0.10)
+        ax.set_title(name, fontsize=9)
+        ax.tick_params(labelsize=7)
+        ax.grid(alpha=0.3)
+        if d == 0:
+            ax.legend(fontsize=7, loc='best')
+    for d in range(len(dim_labels), n_rows * n_cols):
+        axes1.flatten()[d].axis('off')
+    fig1.suptitle(f'Single horizon (sample {args.sample_idx}) — pred vs target '
+                  f'in dataset relative frame', fontsize=11)
+    fig1.tight_layout()
+
+    # ---- plot 2: roll the policy across one full episode --------------------
+    plot_episode(policy, dataset, args, cfg, rel_actions)
+
+    plt.show()
+
+
+def plot_episode(policy, dataset, args, cfg, rel_actions):
+    """Walk through one episode chunk-by-chunk like the runner does, and plot
+    predicted vs recorded actions in absolute (Kinova) coordinates."""
+    import matplotlib.pyplot as plt
+
+    eps_ends   = np.asarray(dataset.replay_buffer.episode_ends)
+    eps_starts = np.concatenate([[0], eps_ends[:-1]])
+    ep_idx = int(np.clip(args.episode_idx, 0, len(eps_ends) - 1))
+    s, e = int(eps_starts[ep_idx]), int(eps_ends[ep_idx])
+    ep_len = e - s
+    print(f'\nRolling episode {ep_idx}: frames [{s}:{e}], length={ep_len}')
+
+    raw_obs    = np.asarray(dataset.replay_buffer['agent_pos'])[s:e]   # (T, 24)
+    raw_action = np.asarray(dataset.replay_buffer['action'])[s:e]      # (T, 24)
+    raw_img    = np.asarray(dataset.replay_buffer['camera_1'])[s:e]    # (T, H, W, 3)
+
+    n_obs = N_OBS_STEPS
+    n_act = cfg.n_action_steps
+    device = policy.device
+
+    pred_abs = np.full_like(raw_action, np.nan, dtype=np.float32)      # (T, 24)
+    chunk_starts = list(range(0, ep_len - n_obs - n_act + 1, n_act))
+
+    for cs in chunk_starts:
+        obs_idx = list(range(cs, cs + n_obs))
+        obs_raw = raw_obs[obs_idx]                                     # (n_obs, 24)
+        img     = raw_img[obs_idx].astype(np.float32)                  # (n_obs, H, W, 3)
+
+        base_pos = obs_raw[-1, :3]
+        base_rot = quat_to_rotmat(obs_raw[-1, 3:7])
+
+        # build agent_pos in dataset's relative format (base = obs[-1])
+        pos_rel  = (obs_raw[:, :3] - base_pos) @ base_rot
+        rot_rel  = rotmat_to_6d(base_rot.T @ quat_to_rotmat(obs_raw[:, 3:7]))
+        hand     = obs_raw[:, 7:]
+        agent_pos_in = np.concatenate([pos_rel, rot_rel, hand], axis=-1).astype(np.float32)
+
+        obs_dict = {
+            'agent_pos': torch.from_numpy(agent_pos_in[None]).to(device),
+            'image':     torch.from_numpy(img[None]).to(device),
+        }
+        with torch.no_grad():
+            out = policy.predict_action(obs_dict)
+        a_rel = out['action_pred'][0].cpu().numpy()                    # (horizon, 26)
+        chunk_rel = a_rel[n_obs - 1 : n_obs - 1 + n_act]               # (n_act, 26)
+        chunk_abs = relative_action_to_absolute(chunk_rel, base_pos, base_rot)
+
+        dst0 = cs + n_obs - 1
+        copy_len = min(n_act, ep_len - dst0)
+        pred_abs[dst0:dst0 + copy_len] = chunk_abs[:copy_len]
+
+    # ---- Convert quats to Euler for interpretable plotting -----------------
+    t = np.arange(ep_len)
+    rec_eul = Rotation.from_quat(raw_action[:, 3:7]).as_euler('xyz', degrees=True)
+    valid = ~np.isnan(pred_abs[:, 3])
+    pred_eul = np.full((ep_len, 3), np.nan, dtype=np.float32)
+    if valid.any():
+        pred_eul[valid] = Rotation.from_quat(pred_abs[valid, 3:7]).as_euler('xyz', degrees=True)
+
+    pred_stack = np.concatenate([pred_abs[:, :3], pred_eul, pred_abs[:, 7:]], axis=-1)
+    rec_stack  = np.concatenate([raw_action[:, :3], rec_eul, raw_action[:, 7:]], axis=-1)
+    labels = (['ee_x', 'ee_y', 'ee_z', 'eul_x', 'eul_y', 'eul_z'] +
+              [f'hand_{i:02d}' for i in range(17)])
+
+    n_cols = 6
+    n_rows = int(np.ceil(len(labels) / n_cols))
+    fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2 * n_rows),
+                               sharex=True)
+    for d, name in enumerate(labels):
+        ax = axes2.flatten()[d]
+        ax.plot(t, rec_stack[:, d],  'k-',  lw=1.2, label='recorded')
+        ax.plot(t, pred_stack[:, d], 'C1-', lw=1.2, alpha=0.85, label='pred')
+        # mark replan boundaries
+        for cs in chunk_starts:
+            ax.axvline(cs + n_obs - 1, color='gray', alpha=0.15, lw=0.5)
+        ax.set_title(name, fontsize=9)
+        ax.tick_params(labelsize=7)
+        ax.grid(alpha=0.3)
+        if d == 0:
+            ax.legend(fontsize=7, loc='best')
+    for d in range(len(labels), n_rows * n_cols):
+        axes2.flatten()[d].axis('off')
+    fig2.suptitle(f'Episode {ep_idx} — rolled pred vs recorded (absolute, '
+                  f'vertical lines = replan boundaries)', fontsize=11)
+    fig2.tight_layout()
 
 
 if __name__ == '__main__':
