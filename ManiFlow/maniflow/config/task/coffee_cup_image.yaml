@@ -39,3 +39,5 @@ dataset:
   seed: 42
   val_ratio: 0.02
   max_train_episodes: 90
+  use_feature_cache: False
+  feature_cache_key: camera_1_r3m
