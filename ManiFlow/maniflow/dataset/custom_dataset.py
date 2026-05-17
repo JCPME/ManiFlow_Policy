@@ -84,7 +84,7 @@ def from_relative_6d(rel_seq: np.ndarray, base_pose: np.ndarray) -> np.ndarray:
 
 class CustomDataset(BaseDataset):
     def __init__(self,
-            zarr_path, 
+            zarr_path,
             horizon=1,
             pad_before=0,
             pad_after=0,
@@ -92,16 +92,21 @@ class CustomDataset(BaseDataset):
             val_ratio=0.0,
             max_train_episodes=None,
             task_name=None,
+            use_feature_cache=False,
+            feature_cache_key='camera_1_r3m',
             ):
         super().__init__()
         self.task_name = task_name
+        self.use_feature_cache = use_feature_cache
+        self.feature_cache_key = feature_cache_key
         cprint(f'Loading DexArtDataset from {zarr_path}', 'green')
 
-        buffer_keys = [
-            'camera_1',
-            'agent_pos', 
-            'action',]
-        
+        if use_feature_cache:
+            buffer_keys = [feature_cache_key, 'agent_pos', 'action']
+            cprint(f'Using pre-computed R3M features: {feature_cache_key}', 'yellow')
+        else:
+            buffer_keys = ['camera_1', 'agent_pos', 'action']
+
         self.replay_buffer = ReplayBuffer.copy_from_path(
                 zarr_path, keys=buffer_keys)
 
@@ -172,7 +177,10 @@ class CustomDataset(BaseDataset):
 
     def _sample_to_data(self, sample):
         agent_pos = sample['agent_pos'][:,].astype(np.float32)
-        image = sample['camera_1'][:,].astype(np.float32)
+        if self.use_feature_cache:
+            image = sample[self.feature_cache_key][:,].astype(np.float32)
+        else:
+            image = sample['camera_1'][:,].astype(np.float32)
         action = sample['action'].astype(np.float32)
 
         base_rot = quat_to_rotmat(agent_pos[-1, 3:7])
