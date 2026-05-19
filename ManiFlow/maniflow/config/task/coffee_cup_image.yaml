@@ -9,6 +9,10 @@ shape_meta: &shape_meta
         shape: [3, 224, 224]
         type: rgb
         horizon: 2
+    image2:
+        shape: [3, 224, 224]
+        type: rgb
+        horizon: 2
     agent_pos:
       shape: [26]
       type: low_dim

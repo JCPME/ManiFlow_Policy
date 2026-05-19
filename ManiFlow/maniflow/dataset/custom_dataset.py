@@ -105,7 +105,7 @@ class CustomDataset(BaseDataset):
             buffer_keys = [feature_cache_key, 'agent_pos', 'action']
             cprint(f'Using pre-computed R3M features: {feature_cache_key}', 'yellow')
         else:
-            buffer_keys = ['camera_1', 'agent_pos', 'action']
+            buffer_keys = ['camera_1', 'camera_2', 'agent_pos', 'action']
 
         self.replay_buffer = ReplayBuffer.copy_from_path(
                 zarr_path, keys=buffer_keys)
@@ -164,6 +164,8 @@ class CustomDataset(BaseDataset):
         normalizer = LinearNormalizer()
         normalizer.fit(data={'action': actions}, last_n_dims=1, mode=mode, **kwargs)
         normalizer['image'] = SingleFieldLinearNormalizer.create_identity()
+        if not self.use_feature_cache:
+            normalizer['image2'] = SingleFieldLinearNormalizer.create_identity()
         
         # Also fit agent_pos so its features are normalized (not identity)
         ap_normalizer = SingleFieldLinearNormalizer()
@@ -179,12 +181,14 @@ class CustomDataset(BaseDataset):
         agent_pos = sample['agent_pos'][:,].astype(np.float32)
         if self.use_feature_cache:
             image = sample[self.feature_cache_key][:,].astype(np.float32)
+            image2 = None
         else:
             image = sample['camera_1'][:,].astype(np.float32)
+            image2 = sample['camera_2'][:,].astype(np.float32)
         action = sample['action'].astype(np.float32)
 
-        base_rot = quat_to_rotmat(agent_pos[-1, 3:7])
-        base_pos = agent_pos[-1,:3]
+        base_rot = quat_to_rotmat(agent_pos[self.pad_before, 3:7])
+        base_pos = agent_pos[self.pad_before, :3]
         
         observed_pos = agent_pos[:, :3]
         observed_rot = quat_to_rotmat(agent_pos[:, 3:7])
@@ -212,11 +216,14 @@ class CustomDataset(BaseDataset):
 
 
         
+        obs = {
+            'agent_pos': agent_pos,
+            'image': image,
+        }
+        if image2 is not None:
+            obs['image2'] = image2
         data = {
-            'obs': {
-                'agent_pos': agent_pos,
-                'image': image
-                },
+            'obs': obs,
             'action': action}
         return data
     

@@ -275,6 +275,14 @@ class TimmObsEncoder(ModuleAttrMixin):
         # process rgb input
         for key in self.rgb_keys:
             img = obs_dict[key]
+
+            # Pre-computed features: (B, T, feat_dim) — skip CNN entirely
+            if img.ndim == 3:
+                B, T = img.shape[:2]
+                assert B == batch_size
+                features.append(img.reshape(B, -1).to(self.device))
+                continue
+
             # normalize image by hand
             if img.max() > 1.0:
                 # assume input in [0, 255]
@@ -297,7 +305,7 @@ class TimmObsEncoder(ModuleAttrMixin):
                 # img shape: Bx3xHxW
                 # new size: Bx3xnHxnW
                 img = F.interpolate(img, size=(target_H, target_W), mode='bilinear', align_corners=False)
-            
+
             assert img.shape[1:] == self.key_shape_map[key]
             img = self.key_transform_map[key](img).to(self.device)
             raw_feature = self.key_model_map[key](img).to(self.device)
