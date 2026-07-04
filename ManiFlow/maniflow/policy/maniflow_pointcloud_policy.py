@@ -422,19 +422,26 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
         x_t_ct = self.linear_interpolate(x0_ct, x1_ct, t_ct, epsilon=0.0)
         x_t_next = self.linear_interpolate(x0_ct, x1_ct, t_next, epsilon=0.0)
 
-        # predict the average velocity from t_next toward next target (t_next + delta_t2)
-        with torch.no_grad():
+        # predict the average velocity from t_next toward next target (t_next + delta_t2).
+        # Build the consistency target in fp32: the EMA-teacher velocity is divided by
+        # (1 - t_ct) — up to ~10x amplification (and a near-zero divisor for non-'discrete'
+        # t-modes) — so bf16 rounding in the teacher would be amplified into the target.
+        # Disabling autocast here is a no-op when AMP is off (preserves fp32 behaviour).
+        with torch.no_grad(), torch.autocast(device_type='cuda', enabled=False):
+            _vis_cond_ct = vis_cond[-consistency_batchsize:]
+            if _vis_cond_ct is not None:
+                _vis_cond_ct = _vis_cond_ct.float()
             v_avg_to_next_target = ema_model.model(
-                sample=x_t_next, 
+                sample=x_t_next.float(),
                 timestep=t_next.squeeze(),
-                target_t=target_t_next.squeeze(), 
-                vis_cond=vis_cond[-consistency_batchsize:],
+                target_t=target_t_next.squeeze(),
+                vis_cond=_vis_cond_ct,
                 lang_cond=lang_cond[-consistency_batchsize:] if lang_cond is not None else None,
-            ) 
-        # predict the target data point using the average velocity
-        pred_x1_ct = x_t_next + (1 - t_next) * v_avg_to_next_target
-        # estimate the velocity at t by using the predicted endpoint
-        v_ct = (pred_x1_ct - x_t_ct) / (1 - t_ct)
+            )
+            # predict the target data point using the average velocity
+            pred_x1_ct = x_t_next + (1 - t_next) * v_avg_to_next_target
+            # estimate the velocity at t by using the predicted endpoint
+            v_ct = (pred_x1_ct - x_t_ct) / (1 - t_ct)
 
         # target_t_ct is the target timestep for the current timestep t
         target_t_ct = delta_t1 if self.sample_target_t_mode == "relative" else t_next.squeeze()

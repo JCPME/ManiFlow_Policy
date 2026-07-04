@@ -18,9 +18,9 @@ obs_as_global_cond: True
 policy:
   _target_: maniflow.policy.maniflow_pointcloud_policy.ManiFlowTransformerPointcloudPolicy
   model_name: "DiTX"
-  n_layer: 12  # max 28
+  n_layer: 6  # max 28
   n_head: 8  # max 16
-  n_emb: 768 # max 1152
+  n_emb: 384 # max 1152
   visual_cond_len: 4096 # >= n_obs_steps * num_points = 2 * 2048 (pointwise tokens)
   max_lang_cond_len: 1024 # maximum length of language tokens
   qkv_bias: false
@@ -75,11 +75,13 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 256
+  batch_size: 210    # PER-GPU batch (~18GB/GPU + DDP/sampling overhead). DDP across 2 GPUs => effective global batch 80.
   num_workers: 8
   shuffle: True
   pin_memory: True
   persistent_workers: True # default False
+  drop_last: True   # drop the partial trailing batch: a tiny batch makes
+                    # consistency_batchsize=int(bs*0.25)=0 -> empty tensor -> NaN loss
 
 val_dataloader:
   batch_size: 128 # 128
@@ -98,6 +100,7 @@ optimizer:
 training:
   device: "cuda:0"
   env_device: "cuda:0"
+  use_amp: True   # bf16 mixed precision (torch.autocast): ~half memory, lower power, faster
   seed: 42
   debug: False
   resume: False
@@ -107,8 +110,8 @@ training:
   gradient_accumulate_every: 1
   use_ema: True
   rollout_every: 500 # 200
-  checkpoint_every: 100
-  val_every: 50
+  checkpoint_every: 10
+  val_every: 5
   sample_every: 5
   max_train_steps: null
   max_val_steps: null
@@ -120,17 +123,17 @@ logging:
   mode: online
   name: ${training.seed}
   project: ManiFlow
-  resume: true
+  resume: false   # always start a fresh wandb run (don't re-attach to a prior run in the output dir)
   tags:
   - ${logging.project}
 
 checkpoint:
   save_ckpt: True # if True, save checkpoint every checkpoint_every
   topk:
-    monitor_key: val_loss # test_mean_score, val_loss
-    mode: min
+    monitor_key: test_mean_score # test_mean_score, val_loss
+    mode: max
     k: 1
-    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.6f}.ckpt'
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.6f}.ckpt'
   save_last_ckpt: True # this only saves when save_ckpt is True
   save_last_snapshot: False
 

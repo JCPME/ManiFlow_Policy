@@ -41,10 +41,14 @@ class TactilePointcloudDataset(BaseDataset):
             max_train_episodes=None,
             task_name=None,
             relative_pointcloud=True,
+            relative_to_ee=True,
             ):
         super().__init__()
         self.task_name = task_name
         self.relative_pointcloud = relative_pointcloud
+        # True: encode obs+action (and, if relative_pointcloud, the cloud) in the LAST-OBSERVED-EE
+        # frame. False: keep everything in the robot BASE frame (base_link) as stored in the zarr.
+        self.relative_to_ee = relative_to_ee
         cprint(f'Loading TactilePointcloudDataset from {zarr_path}', 'green')
 
         buffer_keys = ['point_cloud', 'agent_pos', 'action']
@@ -120,36 +124,46 @@ class TactilePointcloudDataset(BaseDataset):
     def _sample_to_data(self, sample):
         agent_pos = sample['agent_pos'][:,].astype(np.float32)   # (T, 24) ee_pose(7) + hand(17)
         action = sample['action'].astype(np.float32)             # (T, 24) ee_pose_tgt(7) + hand_tgt(17)
-        pc = sample['point_cloud'][:,].astype(np.float32)        # (T, 363, 6) in base_link
+        pc = sample['point_cloud'][:,].astype(np.float32)        # (T, P, 6) in base_link
 
-        # Base frame = the last observed EE pose (index pad_before). Identical to CustomDataset.
-        base_rot = quat_to_rotmat(agent_pos[self.pad_before, 3:7])   # (3, 3)
-        base_pos = agent_pos[self.pad_before, :3]                    # (3,)
-
-        # obs (agent_pos) AND action are absolute EE POSES -> re-expressed in the last-observed-EE
-        # frame, quat -> 6D, hand passthrough. Both 24 -> 26 via the identical transform (ARMlab /
-        # Diffusion-Policy absolute-pose action).
+        # obs (agent_pos) AND action are absolute EE POSES in base_link; quat -> 6D, hand
+        # passthrough. Both 24 -> 26.
         observed_pos = agent_pos[:, :3]
         observed_rot = quat_to_rotmat(agent_pos[:, 3:7])
         observed_hand = agent_pos[:, 7:]
         action_pos = action[:, :3]
         action_rot = quat_to_rotmat(action[:, 3:7])
         action_hand = action[:, 7:]
-        observed_pos_in_base = (observed_pos - base_pos) @ base_rot
-        observed_rot_in_base = rotmat_to_6d(base_rot.T @ observed_rot)
-        action_pos_in_base = (action_pos - base_pos) @ base_rot
-        action_rot_in_base = rotmat_to_6d(base_rot.T @ action_rot)
-        agent_pos_out = np.concatenate(
-            [observed_pos_in_base, observed_rot_in_base, observed_hand], axis=-1).astype(np.float32)
-        action_out = np.concatenate(
-            [action_pos_in_base, action_rot_in_base, action_hand], axis=-1).astype(np.float32)  # (T, 26)
 
-        if self.relative_pointcloud:
-            # Same (base_pos, base_rot) as the poses: positions translate + rotate into the
-            # last-observed-EE frame; force vectors rotate only (no translation).
-            pc_pos = (pc[..., :3] - base_pos) @ base_rot
-            pc_force = pc[..., 3:6] @ base_rot
-            pc = np.concatenate([pc_pos, pc_force], axis=-1).astype(np.float32)
+        if self.relative_to_ee:
+            # Re-express obs + action poses (and, if relative_pointcloud, the cloud) in the
+            # LAST-OBSERVED-EE frame (index pad_before). ARMlab / Diffusion-Policy convention.
+            base_rot = quat_to_rotmat(agent_pos[self.pad_before, 3:7])   # (3, 3)
+            base_pos = agent_pos[self.pad_before, :3]                    # (3,)
+            observed_pos_out = (observed_pos - base_pos) @ base_rot
+            observed_rot_out = rotmat_to_6d(base_rot.T @ observed_rot)
+            action_pos_out = (action_pos - base_pos) @ base_rot
+            action_rot_out = rotmat_to_6d(base_rot.T @ action_rot)
+            if self.relative_pointcloud:
+                # positions translate + rotate into the last-observed-EE frame; force vectors
+                # rotate only (no translation).
+                pc_pos = (pc[..., :3] - base_pos) @ base_rot
+                pc_force = pc[..., 3:6] @ base_rot
+                pc = np.concatenate([pc_pos, pc_force], axis=-1).astype(np.float32)
+        else:
+            # BASE frame: keep the raw base_link poses + cloud unchanged; only quat -> 6D.
+            # The predicted action is then an ABSOLUTE base_link EE-pose target -> at deployment
+            # do NOT compose it with the current EE pose (unlike the EE-relative mode). The cloud
+            # is already in base_link, so relative_pointcloud is ignored here for frame consistency.
+            observed_pos_out = observed_pos
+            observed_rot_out = rotmat_to_6d(observed_rot)
+            action_pos_out = action_pos
+            action_rot_out = rotmat_to_6d(action_rot)
+
+        agent_pos_out = np.concatenate(
+            [observed_pos_out, observed_rot_out, observed_hand], axis=-1).astype(np.float32)  # (T, 26)
+        action_out = np.concatenate(
+            [action_pos_out, action_rot_out, action_hand], axis=-1).astype(np.float32)        # (T, 26)
 
         obs = {
             'point_cloud': pc,

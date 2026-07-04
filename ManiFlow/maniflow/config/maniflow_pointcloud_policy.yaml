@@ -121,11 +121,12 @@ logging:
   group: ${exp_name}
   id: null
   mode: online
-  name: ${training.seed}
+  name: "Relative frame test"
   project: ManiFlow
-  resume: true
+  resume: false
   tags:
   - ${logging.project}
+
 
 checkpoint:
   save_ckpt: False # if True, save checkpoint every checkpoint_every

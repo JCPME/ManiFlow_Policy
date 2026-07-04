@@ -53,6 +53,20 @@ export VK_ICD_FILENAMES="${SCRIPT_DIR}/nvidia_icd.json"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES=${gpu_id}
+# Reduce CUDA fragmentation (this model's cross-attention activations are large)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# Multi-GPU: pass a comma-separated GPU list (e.g. "0,1") as the 5th arg to
+# launch distributed (DDP) training via torchrun. A single id keeps the
+# original single-process path unchanged.
+IFS=',' read -ra _GPU_ARR <<< "${gpu_id}"
+NUM_GPUS=${#_GPU_ARR[@]}
+if [ "${NUM_GPUS}" -gt 1 ]; then
+    LAUNCHER="torchrun --standalone --nnodes=1 --nproc_per_node=${NUM_GPUS}"
+    echo -e "\033[36m=== Multi-GPU (DDP) mode: ${NUM_GPUS} GPUs (${gpu_id}) ===\033[0m"
+else
+    LAUNCHER="python3"
+fi
 
 
 # Set wandb mode based on debug flag
@@ -77,10 +91,10 @@ cd ManiFlow/maniflow/workspace
 # Training phase
 if [ $train = True ]; then
     echo -e "\033[32m=== Starting Training ===\033[0m"
-    python3 train_maniflow_dex_workspace.py \
+    ${LAUNCHER} train_maniflow_dex_workspace.py \
         --config-name=${config_name}.yaml \
         task=${task_name} \
-        task.dataset.zarr_path=${dataset_path} \
+        task.dataset.zarr_path=${zarr_path} \
         hydra.run.dir=${run_dir} \
         training.debug=$DEBUG \
         training.seed=${seed} \
