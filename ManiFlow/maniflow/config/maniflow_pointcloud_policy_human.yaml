@@ -1,0 +1,151 @@
+defaults:
+  - task: human_demo_pointcloud
+
+name: train_maniflow_pointcloud_policy_human
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "maniflow_human"
+
+horizon: 64
+n_obs_steps: 2
+n_action_steps: 32
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+policy:
+  _target_: maniflow.policy.maniflow_pointcloud_policy.ManiFlowTransformerPointcloudPolicy
+  model_name: "DiTX"
+  n_layer: 6  # max 28
+  n_head: 8  # max 16
+  n_emb: 384 # max 1152
+  visual_cond_len: 8192 # >= n_obs_steps * num_points = 2 * 4096 (pointwise tokens)
+  max_lang_cond_len: 1024 # maximum length of language tokens
+  qkv_bias: false
+  qk_norm: false
+
+  language_conditioned: false
+  pre_norm_modality: false
+
+  flow_batch_ratio: 0.75
+  consistency_batch_ratio: 0.25
+
+  sample_t_mode_flow: "beta" # choose between beta or lognorm, both are performing well
+  sample_t_mode_consistency: "discrete"
+  sample_dt_mode_consistency: "uniform"
+  sample_target_t_mode: "relative" # "absolute", "relative"
+  denoise_timesteps: 10
+
+  diffusion_timestep_embed_dim: 128
+  diffusion_target_t_embed_dim: 128
+
+  use_point_crop: false       # human cloud is already cropped offline (table + arm-cut); keep all points
+  crop_shape: null
+  encoder_type: "DP3Encoder"
+  encoder_output_dim: 128
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+
+  num_inference_steps: 10
+  obs_as_global_cond: true
+  shape_meta: ${shape_meta}
+
+  use_pc_color: true          # -> PointNetEncoderXYZRGB, in_channels=6 (xyz + force; force=0 for now)
+  pointnet_type: "pointnet"
+  downsample_points: false    # cloud is already a fixed size (--zarr-points); no FPS
+  pointcloud_encoder_cfg:
+    in_channels: 6            # [x,y,z, fx,fy,fz]; force channels are 0 (no tactile) -> normalized to a constant
+    out_channels: ${policy.encoder_output_dim}
+    use_layernorm: true
+    final_norm: layernorm # layernorm, none
+    normal_channel: false
+    num_points: 4096         # == task point_cloud shape[0] (--zarr-points); keep in sync
+    pointwise: true          # per-point visual tokens -> visual_cond_len >= n_obs_steps*num_points
+
+
+ema:
+  _target_: maniflow.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 210    # PER-GPU batch (~18GB/GPU + DDP/sampling overhead). DDP across 2 GPUs => effective global batch 80.
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True # default False
+  drop_last: True   # drop the partial trailing batch: a tiny batch makes
+                    # consistency_batchsize=int(bs*0.25)=0 -> empty tensor -> NaN loss
+
+val_dataloader:
+  batch_size: 128 # 128
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 1.0e-3
+
+training:
+  device: "cuda:0"
+  env_device: "cuda:0"
+  use_amp: True   # bf16 mixed precision (torch.autocast): ~half memory, lower power, faster
+  seed: 42
+  debug: False
+  resume: False
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 2010 # 2010 for single task, 3000 for multitask
+  gradient_accumulate_every: 1
+  use_ema: True
+  rollout_every: 500 # 200
+  checkpoint_every: 10
+  val_every: 5
+  sample_every: 5
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  group: ${exp_name}
+  id: null
+  mode: online
+  name: ${training.seed}
+  project: ManiFlow
+  resume: false   # always start a fresh wandb run (don't re-attach to a prior run in the output dir)
+  tags:
+  - ${logging.project}
+
+checkpoint:
+  save_ckpt: True # if True, save checkpoint every checkpoint_every
+  topk:
+    monitor_key: test_mean_score # test_mean_score, val_loss
+    mode: max
+    k: 1
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.6f}.ckpt'
+  save_last_ckpt: True # this only saves when save_ckpt is True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
