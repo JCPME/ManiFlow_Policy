@@ -33,7 +33,7 @@ dataset:
   seed: 42
   val_ratio: 0.15
   max_train_episodes: 1000
-  relative_pointcloud: true
+  relative_pointcloud: false
   # Coordinate-frame convention (the zarr is in the global episode-TCP frame, --base-frame tcp_first):
   #   true  -> encode obs+action (+cloud) RELATIVE to the last observed EE (pose deltas). The episode
   #            anchor is cancelled, so a tcp_first zarr == a world zarr in this mode. Deploy: compose the
