@@ -29,7 +29,7 @@ dataset:
   # Human-demo fork of TactilePointcloudDataset (same schema/math; separate so the deployed tactile +
   # coffee-cup path stays untouched). Reads meta.attrs['settings'] to record how the zarr was baked.
   _target_: maniflow.dataset.human_demo_pointcloud_dataset.HumanDemoPointcloudDataset
-  zarr_path: data/human_demo.zarr   # merged multi-episode zarr (offline_human_demo.py merge-zarr)
+  zarr_path: data/human_demo_expert.zarr   # merged DINO zarr (22-ch), transferred via transfer_dino_zarr.sh
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
