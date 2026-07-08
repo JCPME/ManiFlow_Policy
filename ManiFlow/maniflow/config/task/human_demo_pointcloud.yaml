@@ -43,4 +43,4 @@ dataset:
   #            predicted delta onto the robot's current EE + express the cloud relative to it.
   #   false -> keep the global fixed frame = the episode-TCP frame (absolute targets). Deploy: anchor the
   #            robot to its own first EE per episode (inv(first_EE)) and command absolute targets in it.
-  relative_to_ee: true
+  relative_to_ee: false
