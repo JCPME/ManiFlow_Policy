@@ -33,6 +33,9 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
             encoder_output_dim=256,
             crop_shape=None,
             use_pc_color=False,
+            use_tactile=None,           # include the 3 force channels [3:6]; None -> follow use_pc_color
+            use_dino=False,             # include the DINO channels [6:6+dino_dim]
+            dino_dim=0,                 # number of DINO PCA channels appended to the cloud
             pointnet_type="pointnet",
             pointcloud_encoder_cfg=None,
             downsample_points=False,
@@ -61,6 +64,19 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
             
         obs_shape_meta = shape_meta['obs']
         obs_dict = dict_apply(obs_shape_meta, lambda x: x['shape'])
+
+        # Conditional point-cloud channels. Raw cloud = [xyz(3), force(3), dino(dino_dim)]; the flags pick
+        # which blocks feed the pointnet (DINO is processed POINTWISE, exactly like the force channels --
+        # the encoder is unchanged, only its in_channels grows). Legacy: use_tactile=None follows
+        # use_pc_color (True=xyz+force, False=xyz only) so existing configs are unaffected.
+        _use_tac = bool(use_pc_color) if use_tactile is None else bool(use_tactile)
+        self._pc_idx = ([0, 1, 2] + ([3, 4, 5] if _use_tac else [])
+                        + (list(range(6, 6 + int(dino_dim))) if use_dino else []))
+        self.use_tactile, self.use_dino, self.dino_dim = _use_tac, bool(use_dino), int(dino_dim)
+        if pointcloud_encoder_cfg is not None:
+            pointcloud_encoder_cfg['in_channels'] = len(self._pc_idx)   # encoder sized for the selected channels
+        cprint(f"[PC channels] tactile={self.use_tactile} dino={self.use_dino} dino_dim={self.dino_dim} "
+               f"-> in_channels={len(self._pc_idx)} idx={self._pc_idx}", "yellow")
 
         # create observation encoder
         self.encoder_type = encoder_type
@@ -181,8 +197,7 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
         """
         # normalize input
         nobs = self.normalizer.normalize(obs_dict)
-        if not self.use_pc_color:
-            nobs['point_cloud'] = nobs['point_cloud'][..., :3]
+        nobs['point_cloud'] = nobs['point_cloud'][..., self._pc_idx]   # xyz + optional force + optional dino
         
         value = next(iter(nobs.values()))
         B, To = value.shape[:2]
@@ -483,8 +498,7 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action']).to(self.device)
 
-        if not self.use_pc_color:
-            nobs['point_cloud'] = nobs['point_cloud'][..., :3]
+        nobs['point_cloud'] = nobs['point_cloud'][..., self._pc_idx]   # xyz + optional force + optional dino
         
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]

@@ -253,11 +253,13 @@ class DP3Encoder(nn.Module):
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type
         if pointnet_type == "pointnet":
-            if use_pc_color:
-                pointcloud_encoder_cfg.in_channels = 6
+            # in_channels is set upstream by the policy from the tactile/dino flags (xyz + optional force +
+            # optional dino). Fall back to the legacy 6/3 when a caller doesn't provide it.
+            in_ch = int(pointcloud_encoder_cfg.get('in_channels', 6 if use_pc_color else 3))
+            pointcloud_encoder_cfg.in_channels = in_ch
+            if in_ch > 3:                                    # >3 channels -> the XYZ+features pointnet
                 self.extractor = PointNetEncoderXYZRGB(**pointcloud_encoder_cfg)
             else:
-                pointcloud_encoder_cfg.in_channels = 3
                 self.extractor = PointNetEncoderXYZ(**pointcloud_encoder_cfg)
         else:
             raise NotImplementedError(f"pointnet_type: {pointnet_type}")

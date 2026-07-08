@@ -7,11 +7,13 @@ shape_meta: &shape_meta
   obs:
     point_cloud:
       # Human-demo cloud (offline_human_demo.py process --zarr-points P): FFS object points, xyz +
-      # zeros in the force channels (no tactile yet; reserved). [x,y,z, 0,0,0]. Recorded in the global
-      # episode-TCP frame (--base-frame tcp_first); the dataset re-anchors per convention below.
-      # Must equal --zarr-points used at process time.
-      shape: [4096, 6]
-      type: point_cloud
+      # zeros in the force channels (no tactile yet; reserved). [x,y,z, 0,0,0]. Stored in the robot-EE
+      # convention, first-EE anchored — the fixed-first-frame (--base-frame tcp_first) AND the Vive->ORCA
+      # correction are BAKED offline (--anchor-correction), so deploy uses anchor_correction=identity.
+      # The dataset re-anchors per the relative_to_ee convention below. Must equal --zarr-points.
+      shape: [4096, 22]      # raw stored cloud = [xyz(3), force(3), dino(16)]; the policy's use_tactile/
+      type: point_cloud      #   use_dino/dino_dim flags select which channels feed the encoder
+
       horizon: 2
     agent_pos:
       shape: [26]            # 3 pos + 6D rot + 17 hand joints (per relative_to_ee convention)
@@ -24,8 +26,9 @@ shape_meta: &shape_meta
 env_runner: null
 
 dataset:
-  # Reused verbatim from the tactile setup — identical zarr schema (force channels are 0 here).
-  _target_: maniflow.dataset.tactile_pointcloud_dataset.TactilePointcloudDataset
+  # Human-demo fork of TactilePointcloudDataset (same schema/math; separate so the deployed tactile +
+  # coffee-cup path stays untouched). Reads meta.attrs['settings'] to record how the zarr was baked.
+  _target_: maniflow.dataset.human_demo_pointcloud_dataset.HumanDemoPointcloudDataset
   zarr_path: data/human_demo.zarr   # merged multi-episode zarr (offline_human_demo.py merge-zarr)
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
