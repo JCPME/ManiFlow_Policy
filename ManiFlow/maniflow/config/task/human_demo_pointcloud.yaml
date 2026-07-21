@@ -16,7 +16,7 @@ shape_meta: &shape_meta
 
       horizon: 2
     agent_pos:
-      shape: [26]            # 3 pos + 6D rot + 17 hand joints (per relative_to_ee convention)
+      shape: [31]            # 3 pos + 6D rot + 17 hand joints (per relative_to_ee convention)
       type: low_dim
       horizon: 2
   action:
@@ -34,13 +34,13 @@ dataset:
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
-  val_ratio: 0.15
+  val_ratio: 0.05
   max_train_episodes: 1000
-  relative_pointcloud: false
+  relative_pointcloud: true
   # Coordinate-frame convention (the zarr is in the global episode-TCP frame, --base-frame tcp_first):
   #   true  -> encode obs+action (+cloud) RELATIVE to the last observed EE (pose deltas). The episode
   #            anchor is cancelled, so a tcp_first zarr == a world zarr in this mode. Deploy: compose the
   #            predicted delta onto the robot's current EE + express the cloud relative to it.
   #   false -> keep the global fixed frame = the episode-TCP frame (absolute targets). Deploy: anchor the
   #            robot to its own first EE per episode (inv(first_EE)) and command absolute targets in it.
-  relative_to_ee: false
+  relative_to_ee: true

@@ -58,7 +58,7 @@ policy:
   # block to the pointnet input (processed pointwise, like force). in_channels is DERIVED = 3 + 3*tactile
   # + dino_dim*dino. Match to how the zarr was built (task shape_meta.point_cloud must be that width).
   use_tactile: true           # include force channels [3:6]  (human force is 0; set false to drop them)
-  use_dino: true              # include DINO channels [6:6+dino_dim]  (needs a DINO-processed zarr)
+  use_dino: false              # include DINO channels [6:6+dino_dim]  (needs a DINO-processed zarr)
   dino_dim: 16                # number of DINO PCA channels
   pointnet_type: "pointnet"
   downsample_points: false    # cloud is already a fixed size (--zarr-points); no FPS
