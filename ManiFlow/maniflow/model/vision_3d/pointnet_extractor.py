@@ -338,7 +338,10 @@ class DP3Encoder(nn.Module):
         state_feat = self.state_mlp(proprio)
         tac_feat = self.tactile_mlp(tactile)
         pooled = pn_feat if pn_feat.dim() == 2 else pn_feat.max(dim=1).values     # (B, out_channel)
-        y_hat = torch.sigmoid(self.contact_head(pooled))                          # (B, 1) in (0,1)
+        # LOGIT out, sigmoid only where the probability is used: the policy's aux loss must run
+        # binary_cross_entropy_with_logits (plain BCE is forbidden under bf16 autocast).
+        logit = self.contact_head(pooled)                                         # (B, 1) raw logit
+        y_hat = torch.sigmoid(logit)
         if gate_live:
             w = self.gate_eps + (1.0 - self.gate_eps) * y_hat.detach()            # stop-grad + floor
         else:
@@ -348,7 +351,7 @@ class DP3Encoder(nn.Module):
             state_feat = state_feat.unsqueeze(1).expand(-1, pn_feat.shape[1], -1)
             tac_feat = tac_feat.unsqueeze(1).expand(-1, pn_feat.shape[1], -1)
         final_feat = torch.cat([pn_feat, state_feat, tac_feat], dim=-1)
-        return (final_feat, y_hat) if return_contact else final_feat
+        return (final_feat, logit) if return_contact else final_feat
 
 
     def output_shape(self):

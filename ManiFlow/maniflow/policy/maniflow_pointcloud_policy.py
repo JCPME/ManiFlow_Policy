@@ -272,8 +272,9 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
             'action_pred': action_pred,
         }
         if contact_pred is not None:
-            # ŷ per obs frame, (B, n_obs_steps) — the runner logs this next to the tactile state
-            result['contact_gate'] = contact_pred.reshape(B, -1).detach()
+            # ŷ per obs frame, (B, n_obs_steps) — the runner logs this next to the tactile state.
+            # The encoder returns a LOGIT (autocast-safe loss); sigmoid here for the (0,1) gate value.
+            result['contact_gate'] = torch.sigmoid(contact_pred.float()).reshape(B, -1).detach()
 
         return result
 
@@ -619,8 +620,10 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
                 y_obs = (y[:, :self.n_obs_steps].reshape(-1, 1)
                          .to(contact_pred.device).float().clamp(0.0, 1.0))
                 w = 1.0 + (self.gate_ramp_weight - 1.0) * ((y_obs > 0.01) & (y_obs < 0.98)).float()
-                bce = F.binary_cross_entropy(contact_pred.clamp(1e-6, 1.0 - 1e-6), y_obs,
-                                             reduction='none')
+                # contact_pred is a LOGIT; the with_logits form is the autocast-safe BCE (plain
+                # F.binary_cross_entropy raises under bf16 AMP). .float() pins the loss in fp32.
+                bce = F.binary_cross_entropy_with_logits(contact_pred.float(), y_obs,
+                                                         reduction='none')
                 loss_contact = (bce * w).mean()
                 loss += self.gate_lambda * loss_contact
             elif not self._warned_no_ramp:
@@ -638,7 +641,7 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
                 'bc_loss': loss.item(),
         }
         if contact_pred is not None:
-            loss_dict['contact_pred_mean'] = contact_pred.mean().item()
+            loss_dict['contact_pred_mean'] = torch.sigmoid(contact_pred.float()).mean().item()
             if loss_contact is not None:
                 loss_dict['loss_contact'] = loss_contact.item()
 
