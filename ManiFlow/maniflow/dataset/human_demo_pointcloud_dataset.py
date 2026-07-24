@@ -45,6 +45,7 @@ class HumanDemoPointcloudDataset(BaseDataset):
             task_name=None,
             relative_pointcloud=True,
             relative_to_ee=True,
+            use_contact_ramp=False,
             ):
         super().__init__()
         self.task_name = task_name
@@ -56,6 +57,25 @@ class HumanDemoPointcloudDataset(BaseDataset):
         cprint(f'Loading HumanDemoPointcloudDataset from {zarr_path}', 'green')
 
         buffer_keys = ['point_cloud', 'agent_pos', 'action']
+        # ── anticipatory-contact label (experiment_tac_predict): data/contact_ramp (N,1) in [0,1],
+        # baked OFFLINE from the tactile state by hand_control's `contact-ramp` subcommand (ramps up
+        # over t_ramp before contact, 1 in contact, decays after release). Returned as a TOP-LEVEL
+        # batch key so it bypasses the obs normalizer — it is a supervision target, not an obs. ──
+        self.use_contact_ramp = bool(use_contact_ramp)
+        if self.use_contact_ramp:
+            try:
+                import zarr as _zarr
+                _has = 'data/contact_ramp' in _zarr.open(str(zarr_path), mode='r')
+            except Exception:                                    # noqa: BLE001
+                _has = False
+            if _has:
+                buffer_keys.append('contact_ramp')
+                cprint('  contact_ramp: baked labels found -> returned as batch["contact_ramp"]', 'cyan')
+            else:
+                self.use_contact_ramp = False
+                cprint('  WARNING: use_contact_ramp=True but this zarr has NO data/contact_ramp — '
+                       'bake it (offline_human_demo contact-ramp / GUI Contact tab) and re-merge. '
+                       'Training continues WITHOUT the contact aux loss.', 'red')
         self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path, keys=buffer_keys)
 
         # ── read the self-describing settings so training records how the zarr was baked ──
@@ -196,7 +216,12 @@ class HumanDemoPointcloudDataset(BaseDataset):
             'point_cloud': pc,
             'agent_pos': agent_pos_out,
         }
-        return {'obs': obs, 'action': action_out}
+        out = {'obs': obs, 'action': action_out}
+        if self.use_contact_ramp:
+            # (T, 1) float32 in [0,1]; frame-aligned with agent_pos. Top-level key (NOT under obs):
+            # it must never pass through the LinearNormalizer, and it is pose-invariant anyway.
+            out['contact_ramp'] = sample['contact_ramp'].astype(np.float32).reshape(len(agent_pos), 1)
+        return out
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(idx)

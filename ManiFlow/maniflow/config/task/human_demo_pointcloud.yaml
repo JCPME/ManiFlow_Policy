@@ -36,6 +36,10 @@ dataset:
   seed: 42
   val_ratio: 0.05
   max_train_episodes: 1000
+  # Return the baked data/contact_ramp label as batch['contact_ramp'] (the contact_gate_cfg aux
+  # target). Zarrs without the key fall back gracefully (warns; no aux loss). Bake: hand_control
+  # `offline_human_demo contact-ramp` / GUI Contact tab, then re-merge.
+  use_contact_ramp: true
   relative_pointcloud: true
   # Coordinate-frame convention (the zarr is in the global episode-TCP frame, --base-frame tcp_first):
   #   true  -> encode obs+action (+cloud) RELATIVE to the last observed EE (pose deltas). The episode

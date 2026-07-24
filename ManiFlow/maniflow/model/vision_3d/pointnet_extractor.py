@@ -216,6 +216,7 @@ class DP3Encoder(nn.Module):
                  use_pc_color=False,
                  pointnet_type='pointnet',
                  downsample_points=False,
+                 contact_gate_cfg=None,
                  ):
         super().__init__()
         self.imagination_key = 'imagin_robot'
@@ -272,8 +273,36 @@ class DP3Encoder(nn.Module):
             net_arch = state_mlp_size[:-1]
         output_dim = state_mlp_size[-1]
 
+        # ── anticipatory-contact tactile gate (experiment_tac_predict) ──
+        # agent_pos splits into proprio (pose+hand) -> state_mlp and tactile (LAST tactile_dims cols,
+        # the per-finger forces) -> its own small MLP, gated by a contact estimate y_hat predicted
+        # from the POINT CLOUD ALONE. Vision-only input is deliberate: the demos are phase-
+        # stereotyped, so proprio would let the head learn an episode CLOCK instead of hand-object
+        # geometry (the cloud contains the posed hand mesh, so approach distance is visible).
+        # The gate is stop-graded with a floor: w = eps + (1-eps)*sg(y_hat) — policy loss cannot
+        # collapse the gate to starve the tactile branch (dL/dtheta_tactile ∝ w), and the head is
+        # trained ONLY by its own BCE-to-ramp loss in the policy.
+        self.contact_gate_cfg = (dict(contact_gate_cfg)
+                                 if (contact_gate_cfg and contact_gate_cfg.get('enable', False)) else None)
+        self.tactile_dims = 0
+        if self.contact_gate_cfg is not None:
+            self.tactile_dims = int(self.contact_gate_cfg.get('tactile_dims', 5))
+            self.gate_eps = float(self.contact_gate_cfg.get('eps', 0.05))
+            tac_fd = int(self.contact_gate_cfg.get('feat_dim', 32))
+            assert self.state_shape[0] > self.tactile_dims, \
+                f'agent_pos dim {self.state_shape[0]} too small to split off {self.tactile_dims} tactile dims'
+            self.tactile_mlp = nn.Sequential(*create_mlp(self.tactile_dims, tac_fd, [tac_fd],
+                                                         state_mlp_activation_fn))
+            self.contact_head = nn.Sequential(nn.Linear(out_channel, 64), nn.ReLU(),
+                                              nn.Linear(64, 1))
+            self.n_output_channels += tac_fd
+            cprint(f'[DP3Encoder] contact gate ON: state {self.state_shape[0]} -> proprio '
+                   f'{self.state_shape[0] - self.tactile_dims} + tactile {self.tactile_dims} '
+                   f'(feat {tac_fd}, eps {self.gate_eps}); head = pooled pointnet -> 1', 'yellow')
+
         self.n_output_channels  += output_dim
-        self.state_mlp = nn.Sequential(*create_mlp(self.state_shape[0], output_dim, net_arch, state_mlp_activation_fn))
+        state_in = self.state_shape[0] - self.tactile_dims
+        self.state_mlp = nn.Sequential(*create_mlp(state_in, output_dim, net_arch, state_mlp_activation_fn))
         self.pointwise = pointcloud_encoder_cfg.get('pointwise', False)
 
         cprint(f"[DP3Encoder] output dim: {self.n_output_channels}", "red")
@@ -281,25 +310,45 @@ class DP3Encoder(nn.Module):
         cprint(f"[DP3Encoder] output points num: {self.num_points}", "red") if self.pointwise else cprint(f"[DP3Encoder] output points num: 1", "red")
 
 
-    def forward(self, observations: Dict) -> torch.Tensor:
+    def forward(self, observations: Dict, return_contact: bool = False, gate_live: bool = True):
         points = observations[self.point_cloud_key]
         assert len(points.shape) == 3, cprint(f"point cloud shape: {points.shape}, length should be 3", "red")
         if self.use_imagined_robot:
             img_points = observations[self.imagination_key][..., :points.shape[-1]] # align the last dim
             points = torch.concat([points, img_points], dim=1)
-        
+
         if self.downsample_points and points.shape[1] > self.num_points:
             points, _ = self.point_preprocess(points, self.num_points)
 
         # points: B * 3 * (N + sum(Ni))
         pn_feat = self.extractor(points)    # B * out_channel or B * N * out_channel
         state = observations[self.state_key]
-        state_feat = self.state_mlp(state)  # B * 64 
+
+        if self.contact_gate_cfg is None:
+            state_feat = self.state_mlp(state)  # B * 64
+            if len(pn_feat.shape) == 3:
+                # each point has a feature
+                state_feat = state_feat.unsqueeze(1).expand(-1, pn_feat.shape[1], -1)
+            final_feat = torch.cat([pn_feat, state_feat], dim=-1)
+            return (final_feat, None) if return_contact else final_feat
+
+        # ── gated tactile branch (see __init__) ──
+        td = self.tactile_dims
+        proprio, tactile = state[..., :-td], state[..., -td:]
+        state_feat = self.state_mlp(proprio)
+        tac_feat = self.tactile_mlp(tactile)
+        pooled = pn_feat if pn_feat.dim() == 2 else pn_feat.max(dim=1).values     # (B, out_channel)
+        y_hat = torch.sigmoid(self.contact_head(pooled))                          # (B, 1) in (0,1)
+        if gate_live:
+            w = self.gate_eps + (1.0 - self.gate_eps) * y_hat.detach()            # stop-grad + floor
+        else:
+            w = torch.full_like(y_hat, 0.5)                                       # warmup: fixed gate,
+        tac_feat = tac_feat * w                                                   # head still trains
         if len(pn_feat.shape) == 3:
-            # each point has a feature
             state_feat = state_feat.unsqueeze(1).expand(-1, pn_feat.shape[1], -1)
-        final_feat = torch.cat([pn_feat, state_feat], dim=-1)
-        return final_feat
+            tac_feat = tac_feat.unsqueeze(1).expand(-1, pn_feat.shape[1], -1)
+        final_feat = torch.cat([pn_feat, state_feat, tac_feat], dim=-1)
+        return (final_feat, y_hat) if return_contact else final_feat
 
 
     def output_shape(self):

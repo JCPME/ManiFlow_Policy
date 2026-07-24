@@ -41,6 +41,7 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
             downsample_points=False,
             pre_norm_modality=False,
             language_conditioned=False,
+            contact_gate_cfg=None,      # anticipatory-contact tactile gate (experiment_tac_predict)
             # consistency flow training parameters
             flow_batch_ratio=0.75,
             consistency_batch_ratio=0.25,
@@ -78,6 +79,23 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
         cprint(f"[PC channels] tactile={self.use_tactile} dino={self.use_dino} dino_dim={self.dino_dim} "
                f"-> in_channels={len(self._pc_idx)} idx={self._pc_idx}", "yellow")
 
+        # ── anticipatory-contact tactile gate (experiment_tac_predict) ──
+        # The encoder splits off the tactile dims of agent_pos into a gated branch; the gate is a
+        # contact estimate ŷ trained here against the baked `contact_ramp` label (BCE, ramp frames
+        # up-weighted). ŷ is stop-graded before it multiplies the tactile feature (floor eps), so
+        # the flow loss cannot starve the tactile branch by closing the gate. First `warmup_steps`
+        # training steps run with the gate FIXED at 0.5 while the head trains.
+        self.contact_gate_cfg = (dict(contact_gate_cfg)
+                                 if (contact_gate_cfg and contact_gate_cfg.get('enable', False)) else None)
+        if self.contact_gate_cfg is not None:
+            self.gate_lambda = float(self.contact_gate_cfg.get('lambda_c', 0.2))
+            self.gate_warmup_steps = int(self.contact_gate_cfg.get('warmup_steps', 1000))
+            self.gate_ramp_weight = float(self.contact_gate_cfg.get('ramp_weight', 2.0))
+            self.register_buffer('gate_step', torch.zeros((), dtype=torch.long))
+            self._warned_no_ramp = False
+            cprint(f"[ManiFlowTransformerPointcloudPolicy] contact gate ON: lambda_c={self.gate_lambda} "
+                   f"warmup={self.gate_warmup_steps} ramp_weight={self.gate_ramp_weight}", "yellow")
+
         # create observation encoder
         self.encoder_type = encoder_type
         if encoder_type == "DP3Encoder":
@@ -88,6 +106,7 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
                                                     use_pc_color=use_pc_color,
                                                     pointnet_type=pointnet_type,
                                                     downsample_points=downsample_points,
+                                                    contact_gate_cfg=self.contact_gate_cfg,
                                                     )
         else:
             raise ValueError(f"Unsupported encoder type {encoder_type}")
@@ -221,7 +240,12 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
         
         # condition through visual feature
         this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]).to(device))
-        nobs_features = self.obs_encoder(this_nobs)
+        contact_pred = None
+        if self.contact_gate_cfg is not None:
+            nobs_features, contact_pred = self.obs_encoder(this_nobs, return_contact=True,
+                                                           gate_live=True)
+        else:
+            nobs_features = self.obs_encoder(this_nobs)
         vis_cond = nobs_features.reshape(B, -1, Do) # B, self.n_obs_steps*L, Do
         # empty data for action
         cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
@@ -247,7 +271,10 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
             'action': action,
             'action_pred': action_pred,
         }
-        
+        if contact_pred is not None:
+            # ŷ per obs frame, (B, n_obs_steps) — the runner logs this next to the tactile state
+            result['contact_gate'] = contact_pred.reshape(B, -1).detach()
+
         return result
 
     # ========= training  ============
@@ -517,9 +544,17 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
             assert lang_cond is not None, "Language goal is required"
 
         # reshape B, T, ... to B*T
-        this_nobs = dict_apply(nobs, 
+        this_nobs = dict_apply(nobs,
             lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]).to(self.device))
-        nobs_features = self.obs_encoder(this_nobs)
+        contact_pred = None
+        if self.contact_gate_cfg is not None:
+            gate_live = bool(self.gate_step.item() >= self.gate_warmup_steps)
+            nobs_features, contact_pred = self.obs_encoder(this_nobs, return_contact=True,
+                                                           gate_live=gate_live)
+            if self.training:
+                self.gate_step += 1
+        else:
+            nobs_features = self.obs_encoder(this_nobs)
         vis_cond = nobs_features.reshape(batch_size, -1, self.obs_feature_dim)
         this_n_point_cloud = this_nobs['point_cloud'].reshape(batch_size,-1, *this_nobs['point_cloud'].shape[1:])
         this_n_point_cloud = this_n_point_cloud[..., :3]
@@ -571,7 +606,28 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
         loss_ct = F.mse_loss(v_ct_pred, v_ct_target, reduction='none')
         loss_ct = reduce(loss_ct, 'b ... -> b (...)', 'mean')
         loss += loss_ct.mean()
-        loss_ct = loss_ct.mean().item()  
+        loss_ct = loss_ct.mean().item()
+
+        # ── anticipatory-contact aux loss (experiment_tac_predict): BCE(ŷ, contact_ramp) on the
+        # obs frames. Ramp frames (0 < y < 1, the anticipation/decay windows) are up-weighted:
+        # contact-now is trivial from the cloud, the LEAD is what the gate exists for. The gate
+        # itself sees only stop-graded ŷ, so this is the ONLY gradient the head receives. ──
+        loss_contact = None
+        if contact_pred is not None:
+            y = batch.get('contact_ramp', None)
+            if y is not None:
+                y_obs = (y[:, :self.n_obs_steps].reshape(-1, 1)
+                         .to(contact_pred.device).float().clamp(0.0, 1.0))
+                w = 1.0 + (self.gate_ramp_weight - 1.0) * ((y_obs > 0.01) & (y_obs < 0.98)).float()
+                bce = F.binary_cross_entropy(contact_pred.clamp(1e-6, 1.0 - 1e-6), y_obs,
+                                             reduction='none')
+                loss_contact = (bce * w).mean()
+                loss += self.gate_lambda * loss_contact
+            elif not self._warned_no_ramp:
+                self._warned_no_ramp = True
+                cprint('WARNING: contact gate is ON but the batch has no "contact_ramp" — set '
+                       'task.dataset.use_contact_ramp=true and bake the labels into the zarr. '
+                       'The head gets NO supervision; the gate will sit near its init.', 'red')
 
         loss = loss.mean()
         loss_dict = {
@@ -581,6 +637,10 @@ class ManiFlowTransformerPointcloudPolicy(BasePolicy):
                 'v_ct_pred_magnitude': v_ct_pred_magnitude,
                 'bc_loss': loss.item(),
         }
-        
+        if contact_pred is not None:
+            loss_dict['contact_pred_mean'] = contact_pred.mean().item()
+            if loss_contact is not None:
+                loss_dict['loss_contact'] = loss_contact.item()
+
 
         return loss, loss_dict

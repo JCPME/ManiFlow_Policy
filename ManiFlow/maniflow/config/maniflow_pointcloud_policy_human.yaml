@@ -60,6 +60,22 @@ policy:
   use_tactile: true           # include force channels [3:6]  (human force is 0; set false to drop them)
   use_dino: false              # include DINO channels [6:6+dino_dim]  (needs a DINO-processed zarr)
   dino_dim: 16                # number of DINO PCA channels
+
+  # ── Anticipatory-contact tactile gate (experiment_tac_predict) ──
+  # Splits agent_pos into proprio (26) + tactile (last 5, the per-finger forces) with separate
+  # encoders; a vision-only contact head (pooled pointnet -> sigmoid) predicts the baked
+  # `contact_ramp` label (ramps up over t_ramp before contact, 1 in contact, decays after release)
+  # and gates the tactile feature: w = eps + (1-eps)*stopgrad(ŷ). Needs zarrs baked with the
+  # hand_control `contact-ramp` subcommand (GUI Contact tab) AND task.dataset.use_contact_ramp=true.
+  # enable:false reproduces the exact pre-branch architecture (token dim 192; with it, 224).
+  contact_gate_cfg:
+    enable: true
+    tactile_dims: 5           # last N agent_pos cols = the tactile state block
+    feat_dim: 32              # tactile branch feature width (token dim grows by this)
+    eps: 0.05                 # gate floor: tactile branch always gets some gradient
+    lambda_c: 0.2             # aux BCE weight
+    warmup_steps: 1000        # gate fixed at 0.5 for the first N train steps (head still learns)
+    ramp_weight: 2.0          # extra BCE weight on the 0<y<1 anticipation/decay frames
   pointnet_type: "pointnet"
   downsample_points: false    # cloud is already a fixed size (--zarr-points); no FPS
   pointcloud_encoder_cfg:
