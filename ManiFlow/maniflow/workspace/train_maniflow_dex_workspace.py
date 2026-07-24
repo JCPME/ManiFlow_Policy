@@ -457,16 +457,19 @@ class TrainManiFlowDexWorkspace:
             if (self.epoch % cfg.training.val_every) == 0 and RUN_VALIDATION and is_main:
                 with torch.no_grad():
                     val_losses = list()
+                    val_contact_losses = list()          # contact-gate aux loss (experiment_tac_predict)
                     with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}",
                             leave=False, mininterval=cfg.training.tqdm_interval_sec,
                             disable=not is_main) as tepoch:
                         for batch_idx, batch in enumerate(tepoch):
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                        
+
                             # Forward pass
                             with amp_ctx():
                                 loss, loss_dict = self.model.compute_loss(batch, self.ema_model)
                             val_losses.append(loss)
+                            if 'loss_contact' in loss_dict:
+                                val_contact_losses.append(float(loss_dict['loss_contact']))
                             if (cfg.training.max_val_steps is not None) \
                                 and batch_idx >= (cfg.training.max_val_steps-1):
                                 break
@@ -474,6 +477,8 @@ class TrainManiFlowDexWorkspace:
                         val_loss = torch.mean(torch.tensor(val_losses)).item()
                         # log epoch average validation loss
                         step_log['val_loss'] = val_loss
+                    if len(val_contact_losses) > 0:
+                        step_log['val_loss_contact'] = float(np.mean(val_contact_losses))
 
             # open-loop action eval on the held-out VAL demos (proxy for task
             # performance: how closely the EMA policy's sampled actions match the
@@ -483,18 +488,62 @@ class TrainManiFlowDexWorkspace:
                     s = self.model.n_obs_steps - 1
                     e = s + self.model.n_action_steps        # executed slice
                     preds, gts = list(), list()
+                    cg_pred, cg_true = list(), list()        # contact head ŷ vs baked label
                     for batch in val_dataloader:
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                         with amp_ctx():
                             result = policy.predict_action(batch['obs'])  # EMA, unnormalized
                         preds.append(result['action'].float().cpu())
                         gts.append(batch['action'][:, s:e].float().cpu())
+                        if 'contact_gate' in result and 'contact_ramp' in batch:
+                            cg_pred.append(result['contact_gate'][:, -1].float().cpu())   # ŷ at the
+                            cg_true.append(batch['contact_ramp'][:, s, 0].float().cpu())  # current frame
                         del batch, result
                     if len(preds) > 0:
                         m = action_error_metrics(torch.cat(preds), torch.cat(gts))
                         for k, v in m.items():
                             step_log[f'val_{k}'] = v
                     del preds, gts
+                    # ── contact-gate diagnostics (experiment_tac_predict), EMA policy on the FULL
+                    # val set. val_dataloader is unshuffled, so windows are episode-ordered and the
+                    # trace plot reads as (piecewise) episode time: the ŷ bump should LEAD the
+                    # label's contact plateaus by ~t_ramp and decay after them. ──
+                    if len(cg_pred) > 0:
+                        yh = torch.cat(cg_pred).numpy()
+                        yt = torch.cat(cg_true).numpy()
+                        in_c, out_c = yh[yt >= 0.999], yh[yt <= 0.01]
+                        ramp = yh[(yt > 0.01) & (yt < 0.999)]
+                        if len(in_c) and len(out_c):
+                            # rank AUC (contact vs no-contact separability), no sklearn dependency
+                            ranks = np.concatenate([out_c, in_c]).argsort().argsort() + 1
+                            r_pos = float(ranks[len(out_c):].sum())
+                            step_log['val_contact_auc'] = float(
+                                (r_pos - len(in_c) * (len(in_c) + 1) / 2) / max(len(in_c) * len(out_c), 1))
+                        if len(in_c):
+                            step_log['val_contact_pred_at_contact'] = float(in_c.mean())
+                        if len(out_c):
+                            step_log['val_contact_pred_at_zero'] = float(out_c.mean())
+                        if len(ramp):
+                            step_log['val_contact_pred_at_ramp'] = float(ramp.mean())
+                        try:                                  # trace figure -> wandb.Image
+                            import matplotlib
+                            matplotlib.use('Agg')
+                            import matplotlib.pyplot as plt
+                            k = min(len(yt), 1200)            # first ~episodes; keeps the plot readable
+                            fig, ax = plt.subplots(figsize=(11, 2.8), dpi=110)
+                            ax.fill_between(np.arange(k), yt[:k], color='0.6', alpha=0.35,
+                                            label='contact_ramp (label)')
+                            ax.plot(yh[:k], color='tab:red', lw=0.9, label='contact head ŷ (EMA)')
+                            ax.set_ylim(-0.02, 1.05)
+                            ax.set_xlabel('val window (episode-ordered)')
+                            ax.legend(loc='upper right', fontsize=8)
+                            ax.set_title(f'epoch {self.epoch}: ŷ vs label — the bump should LEAD '
+                                         f'each plateau', fontsize=9)
+                            fig.tight_layout()
+                            step_log['val_contact_trace'] = wandb.Image(fig)
+                            plt.close(fig)
+                        except Exception:                     # plotting must never kill training
+                            pass
 
             # run diffusion sampling on a training batch (main rank only)
             if (self.epoch % cfg.training.sample_every) == 0 and is_main:
